@@ -1,5 +1,7 @@
 # Polydictions
 
+CA: iATcGSt9DhJF9ZiJ6dmR153N7bW2G4J9dSSDxWSpumpㅤ
+
 A Telegram bot for tracking and analyzing Polymarket prediction markets in real-time.
 
 ## Features
