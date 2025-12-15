@@ -1,0 +1,45 @@
+# Environment and configuration
+.env
+config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+ENV/
+
+# Bot data files
+users.json
+seen_events.json
+keywords.json
+paused_users.json
+watchlist.json
+price_alerts.json
+user_categories.json
+
+# Test bot folder (not for production)
+test-bot/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/
