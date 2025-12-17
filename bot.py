@@ -9,14 +9,22 @@ from pathlib import Path
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, BotCommand, MenuButtonCommands
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
+
+# FSM States for waiting user input
+class UserStates(StatesGroup):
+    waiting_for_deal_link = State()
+    waiting_for_watch_link = State()
+
 # Import new features
-from features import Watchlist, Categories, Alerts
+from features import Watchlist, Categories, Alerts, NewsTracker
 
 env_path = Path(__file__).parent / '.env'
 load_dotenv(dotenv_path=env_path)
@@ -32,7 +40,16 @@ USERS_FILE = "users.json"
 SEEN_EVENTS_FILE = "seen_events.json"
 KEYWORDS_FILE = "keywords.json"
 PAUSED_USERS_FILE = "paused_users.json"
+POSTED_EVENTS_FILE = "posted_events.json"
 CHECK_INTERVAL = 60  # Check every 60 seconds (1 minute)
+NEWS_CHECK_INTERVAL = 300  # Check watchlist news every 5 minutes
+
+# Channel for broadcasting (loaded from config)
+CHANNEL_ID = None
+try:
+    from config import CHANNEL_ID
+except ImportError:
+    pass
 
 subscribed_users: Set[int] = set()
 seen_events: Set[str] = set()
@@ -52,7 +69,7 @@ class Storage:
             except Exception as e:
                 logger.error(f"Error loading users: {e}")
         return set()
-    
+
     @staticmethod
     def save_users(users: Set[int]):
         try:
@@ -121,6 +138,48 @@ class Storage:
             logger.info(f"Saved {len(users)} paused users")
         except Exception as e:
             logger.error(f"Error saving paused users: {e}")
+
+    @staticmethod
+    def load_posted_events() -> List[Dict]:
+        """Load recently posted events for extension sync"""
+        if Path(POSTED_EVENTS_FILE).exists():
+            try:
+                with open(POSTED_EVENTS_FILE, 'r') as f:
+                    data = json.load(f)
+                    return data.get('events', [])
+            except Exception as e:
+                logger.error(f"Error loading posted events: {e}")
+        return []
+
+    @staticmethod
+    def save_posted_event(event_data: Dict):
+        """Save posted event for extension sync (keep last 50)"""
+        try:
+            events = Storage.load_posted_events()
+
+            # Add new event with timestamp
+            posted_event = {
+                'id': event_data.get('id'),
+                'slug': event_data.get('slug'),
+                'title': event_data.get('title'),
+                'volume': event_data.get('volume'),
+                'liquidity': event_data.get('liquidity'),
+                'markets': event_data.get('markets', []),
+                'posted_at': datetime.now().isoformat()
+            }
+
+            # Add to beginning (newest first)
+            events.insert(0, posted_event)
+
+            # Keep only last 50
+            events = events[:50]
+
+            with open(POSTED_EVENTS_FILE, 'w') as f:
+                json.dump({'events': events}, f, indent=2)
+
+            logger.info(f"Saved posted event: {event_data.get('title', 'N/A')[:50]}")
+        except Exception as e:
+            logger.error(f"Error saving posted event: {e}")
 
 
 class PolymarketAPI:
@@ -287,9 +346,11 @@ class PolymarketAPI:
         url = f"{POLYMARKET_API}/events"
         params = {
             "limit": limit,
-            "offsetgit init": 0,
+            "offset": 0,
             "closed": "false",
-            "order": "new"
+            "active": "true",
+            "order": "createdAt",
+            "ascending": "false"
         }
 
         import ssl
@@ -310,7 +371,7 @@ class PolymarketAPI:
             logger.error(f"Error fetching events: {e}")
 
         return []
-    
+
     @staticmethod
     def parse_polymarket_url(url: str) -> Optional[str]:
         pattern = r'polymarket\.com/event/([a-zA-Z0-9\-]+)'
@@ -326,7 +387,7 @@ class PolymarketAPI:
             return f"${num:,.0f}"
         except:
             return "$0"
-    
+
     @staticmethod
     def format_date(date_str: str) -> str:
         if not date_str:
@@ -336,7 +397,7 @@ class PolymarketAPI:
             return dt.strftime('%B %d, %Y at %H:%M UTC')
         except:
             return date_str
-    
+
     @staticmethod
     def calculate_totals(markets: List[Dict]) -> tuple:
         total_liquidity = 0.0
@@ -353,7 +414,7 @@ class PolymarketAPI:
                 total_volume += volume
             except:
                 pass
-        
+
         return total_liquidity, total_volume
 
     @staticmethod
@@ -362,25 +423,25 @@ class PolymarketAPI:
             title = event_data.get('title', 'Unknown Event')
             slug = event_data.get('slug', '')
             markets = event_data.get('markets', [])
-            
+
             if not markets:
                 return "No market data available"
-            
+
             event_liquidity = event_data.get('liquidity')
             event_volume = event_data.get('volume')
-            
+
             if event_liquidity is not None and event_volume is not None:
                 total_liquidity = float(event_liquidity)
                 total_volume = float(event_volume)
             else:
                 total_liquidity, total_volume = PolymarketAPI.calculate_totals(markets)
-            
+
             end_date = event_data.get('endDate')
             if not end_date and markets:
                 end_date = markets[0].get('endDate') or markets[0].get('end_date_iso')
-            
+
             formatted_date = PolymarketAPI.format_date(end_date)
-            
+
             msg = []
             msg.append(f"🟠 <b>{title}</b>\n")
             msg.append(f"🔗 <b>Link:</b> https://polymarket.com/event/{slug}\n")
@@ -388,24 +449,24 @@ class PolymarketAPI:
             msg.append(f"<b>Closes:</b> {formatted_date}")
             msg.append(f"<b>Total Liquidity:</b> {PolymarketAPI.format_money(total_liquidity)}")
             msg.append(f"<b>Total Volume:</b> {PolymarketAPI.format_money(total_volume)}\n")
-            
+
             if len(markets) == 1:
                 market = markets[0]
                 outcomes = market.get('outcomes', [])
-                
+
                 if outcomes and isinstance(outcomes, str):
                     try:
                         outcomes = json.loads(outcomes)
                     except:
                         outcomes = []
-                
+
                 outcome_prices = market.get('outcomePrices')
                 if isinstance(outcome_prices, str):
                     try:
                         outcome_prices = json.loads(outcome_prices)
                     except:
                         outcome_prices = []
-                
+
                 if len(outcomes) == 2:
                     msg.append("🟠 <b>Current Odds:</b>")
                     for idx, outcome in enumerate(outcomes):
@@ -432,37 +493,37 @@ class PolymarketAPI:
                             market_outcomes = json.loads(market_outcomes)
                         except:
                             market_outcomes = []
-                    
+
                     market_prices = market.get('outcomePrices')
                     if isinstance(market_prices, str):
                         try:
                             market_prices = json.loads(market_prices)
                         except:
                             market_prices = []
-                    
+
                     # Only include markets with valid outcomes and prices
                     if market_outcomes and market_prices:
                         valid_markets.append(market)
-                
+
                 msg.append(f"🟠 <b>Markets ({len(valid_markets)}):</b>")
                 for idx, market in enumerate(valid_markets, 1):
                     question = market.get('question', f'Market {idx}')
                     msg.append(f"  {idx}. {question}")
-                    
+
                     market_outcomes = market.get('outcomes', [])
                     if isinstance(market_outcomes, str):
                         try:
                             market_outcomes = json.loads(market_outcomes)
                         except:
                             market_outcomes = []
-                    
+
                     market_prices = market.get('outcomePrices')
                     if isinstance(market_prices, str):
                         try:
                             market_prices = json.loads(market_prices)
                         except:
                             market_prices = []
-                    
+
                     if market_outcomes and market_prices:
                         for o_idx, outcome in enumerate(market_outcomes[:5]):
                             o_name = outcome.get('name', outcome) if isinstance(outcome, dict) else outcome
@@ -470,7 +531,7 @@ class PolymarketAPI:
                                 o_price = float(market_prices[o_idx])
                                 o_percentage = o_price * 100 if o_price <= 1 else o_price
                                 msg.append(f"     • {o_name}: {o_percentage:.1f}%")
-            
+
             return "\n".join(msg)
 
         except Exception as e:
@@ -504,7 +565,7 @@ class PolymarketAPI:
 
 
 class PolydictionsBot:
-    
+
     def __init__(self, token: str):
         self.bot = Bot(
             token=token,
@@ -516,6 +577,7 @@ class PolydictionsBot:
         self.watchlist = Watchlist()
         self.categories = Categories()
         self.alerts = Alerts()
+        self.news_tracker = NewsTracker()
 
         self.setup_handlers()
 
@@ -527,7 +589,7 @@ class PolydictionsBot:
 
         logger.info(f"Loaded {len(subscribed_users)} users, {len(seen_events)} events, "
                    f"{len(user_keywords)} keyword filters, {len(paused_users)} paused users")
-    
+
     def setup_handlers(self):
         self.dp.message.register(self.cmd_start, Command("start"))
         self.dp.message.register(self.cmd_deal, Command("deal"))
@@ -545,7 +607,33 @@ class PolydictionsBot:
         self.dp.message.register(self.cmd_alert, Command("alert"))
         self.dp.message.register(self.cmd_alerts, Command("alerts"))
         self.dp.message.register(self.cmd_rmalert, Command("rmalert"))
-    
+        self.dp.message.register(self.cmd_interval, Command("interval"))
+
+        # State handlers - waiting for user input
+        self.dp.message.register(self.handle_deal_link, StateFilter(UserStates.waiting_for_deal_link))
+        self.dp.message.register(self.handle_watch_link, StateFilter(UserStates.waiting_for_watch_link))
+
+    async def setup_bot_commands(self):
+        """Set up the bot menu button with commands"""
+        commands = [
+            BotCommand(command="start", description="🚀 Subscribe to notifications"),
+            BotCommand(command="deal", description="📊 Analyze event with AI"),
+            BotCommand(command="watchlist", description="📋 Show your watchlist"),
+            BotCommand(command="watch", description="⭐ Add event to watchlist"),
+            BotCommand(command="interval", description="⏱️ Set update interval"),
+            BotCommand(command="alerts", description="🔔 Show price alerts"),
+            BotCommand(command="alert", description="⏰ Set price alert"),
+            BotCommand(command="keywords", description="🔍 Set keyword filters"),
+            BotCommand(command="categories", description="📂 Show categories"),
+            BotCommand(command="pause", description="⏸️ Pause notifications"),
+            BotCommand(command="resume", description="▶️ Resume notifications"),
+            BotCommand(command="help", description="❓ Show help"),
+        ]
+
+        await self.bot.set_my_commands(commands)
+        await self.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Bot menu commands set up successfully")
+
     async def cmd_start(self, message: Message):
         user_id = message.from_user.id
         subscribed_users.add(user_id)
@@ -555,38 +643,40 @@ class PolydictionsBot:
             "🎯 <b>Welcome to Polydictions Bot</b>\n\n"
             "Track and analyze Polymarket events.\n\n"
             "<b>📊 Main Commands:</b>\n"
-            "/deal &lt;link&gt; - Analyze event with AI Context\n"
-            "/start - Subscribe to notifications\n"
-            "/pause - Pause notifications\n"
-            "/resume - Resume notifications\n\n"
+            "📊 /deal &lt;link&gt; - Analyze event\n"
+            "🔔 /start - Subscribe to notifications\n"
+            "⏸️ /pause - Pause notifications\n"
+            "▶️ /resume - Resume notifications\n\n"
             "<b>🔍 Filters:</b>\n"
-            "/keywords - Filter by keywords\n"
-            "/category - Filter by category (crypto, politics, sports)\n"
-            "/categories - Show all categories\n\n"
+            "🔍 /keywords - Filter by keywords\n"
+            "📂 /category - Filter by category\n"
+            "📂 /categories - Show all categories\n\n"
             "<b>📋 Watchlist:</b>\n"
-            "/watch &lt;slug&gt; - Add to watchlist\n"
-            "/watchlist - Show watchlist\n"
-            "/unwatch &lt;slug&gt; - Remove from watchlist\n\n"
+            "⭐ /watch &lt;slug&gt; - Add to watchlist\n"
+            "📋 /watchlist - Show watchlist\n"
+            "❌ /unwatch &lt;slug&gt; - Remove from watchlist\n\n"
             "<b>🔔 Price Alerts:</b>\n"
-            "/alert &lt;slug&gt; &gt; &lt;%&gt; - Set alert\n"
-            "/alerts - Show alerts\n"
-            "/rmalert &lt;#&gt; - Remove alert\n\n"
-            "You're now subscribed to new events! 🔔\n\n"
-            "💡 <b>Pro tip:</b> Use /category or /keywords to filter events!"
+            "🔔 /alert &lt;slug&gt; &gt; &lt;%&gt; - Set alert\n"
+            "📊 /alerts - Show alerts\n"
+            "❌ /rmalert &lt;#&gt; - Remove alert\n\n"
+            "You're now subscribed to new events! 🔔\n"
+            "Use /help for more info"
         )
 
         await message.answer(text)
         logger.info(f"User {user_id} subscribed")
-    
-    async def cmd_deal(self, message: Message):
+
+    async def cmd_deal(self, message: Message, state: FSMContext):
         text = message.text or ""
         parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
+            # No link provided - ask for it and wait
             await message.answer(
-                "❌ Please provide a Polymarket link.\n\n"
-                "Example:\n/deal https://polymarket.com/event/your-event-slug"
+                "🔗 <b>Send me a Polymarket link</b>\n\n"
+                "Example:\nhttps://polymarket.com/event/your-event-slug"
             )
+            await state.set_state(UserStates.waiting_for_deal_link)
             return
 
         url = parts[1].strip()
@@ -661,7 +751,101 @@ class PolydictionsBot:
         except Exception as e:
             logger.error(f"Error in /deal: {e}")
             await processing.edit_text(f"❌ Error: {str(e)}")
-    
+
+    async def handle_deal_link(self, message: Message, state: FSMContext):
+        """Handle link sent after /deal command"""
+        # Clear state first
+        await state.clear()
+
+        url = message.text.strip() if message.text else ""
+        slug = PolymarketAPI.parse_polymarket_url(url)
+
+        # Also try treating input as slug directly
+        if not slug:
+            slug = url.replace("https://", "").replace("http://", "").strip("/")
+            if "/" in slug or " " in slug or len(slug) < 3:
+                slug = None
+
+        if not slug:
+            await message.answer(
+                "❌ Invalid link. Please send a valid Polymarket URL.\n\n"
+                "Example: https://polymarket.com/event/your-event-slug"
+            )
+            return
+
+        # Process the event (same logic as cmd_deal)
+        processing = await message.answer("⏳ Fetching event data...")
+
+        try:
+            event_data = await PolymarketAPI.fetch_event_by_slug(slug)
+
+            if not event_data:
+                await processing.edit_text("❌ Event not found")
+                return
+
+            basic_msg = PolymarketAPI.format_event(event_data)
+            await processing.edit_text(basic_msg)
+
+            context_msg = await message.answer("🧠 Generating Market Context... (this may take 10-30 seconds)")
+
+            markets = event_data.get('markets', [])
+            market_question = markets[0].get('question') if markets else None
+
+            event_slug = event_data.get('slug', '')
+            market_context = await PolymarketAPI.fetch_market_context(event_slug, market_question)
+
+            if market_context:
+                context_text = f"🧠 <b>Market Context:</b>\n\n{market_context}"
+                if len(context_text) > 4000:
+                    chunks = [market_context[i:i+3900] for i in range(0, len(market_context), 3900)]
+                    for idx, chunk in enumerate(chunks):
+                        if idx == 0:
+                            await context_msg.edit_text(f"🧠 <b>Market Context (Part {idx+1}):</b>\n\n{chunk}")
+                        else:
+                            await message.answer(f"🧠 <b>Market Context (Part {idx+1}):</b>\n\n{chunk}")
+                else:
+                    await context_msg.edit_text(context_text)
+            else:
+                await context_msg.edit_text(
+                    "⚠️ Market Context generation failed.\n\n"
+                    "This can happen if:\n"
+                    "• The event is too new\n"
+                    "• The API is temporarily unavailable"
+                )
+
+            logger.info(f"User {message.from_user.id} checked event: {slug}")
+
+        except Exception as e:
+            logger.error(f"Error in handle_deal_link: {e}")
+            await processing.edit_text(f"❌ Error: {str(e)}")
+
+    async def handle_watch_link(self, message: Message, state: FSMContext):
+        """Handle link sent after /watch command"""
+        await state.clear()
+
+        url = message.text.strip() if message.text else ""
+        slug = PolymarketAPI.parse_polymarket_url(url)
+
+        if not slug:
+            slug = url.replace("https://", "").replace("http://", "").strip("/")
+            if "/" in slug or " " in slug or len(slug) < 3:
+                slug = None
+
+        if not slug:
+            await message.answer(
+                "❌ Invalid link. Please send a valid Polymarket URL.\n\n"
+                "Example: https://polymarket.com/event/your-event-slug"
+            )
+            return
+
+        user_id = message.from_user.id
+
+        if self.watchlist.add(user_id, slug):
+            await message.answer(f"✅ Added <b>{slug}</b> to your watchlist!")
+            logger.info(f"User {user_id} added {slug} to watchlist")
+        else:
+            await message.answer(f"ℹ️ <b>{slug}</b> is already in your watchlist.")
+
     async def cmd_help(self, message: Message):
         text = (
             "<b>Polydictions Bot</b>\n\n"
@@ -809,18 +993,19 @@ class PolydictionsBot:
         logger.info(f"User {user_id} resumed notifications")
 
     # Watchlist commands
-    async def cmd_watch(self, message: Message):
+    async def cmd_watch(self, message: Message, state: FSMContext):
         """Add event to watchlist"""
         user_id = message.from_user.id
         text = message.text or ""
         parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
+            # No link provided - ask for it and wait
             await message.answer(
-                "❌ Please provide a Polymarket link or event slug.\n\n"
-                "Example:\n/watch https://polymarket.com/event/btc-price-2025\n"
-                "or\n/watch btc-price-2025"
+                "🔗 <b>Send me a Polymarket link to watch</b>\n\n"
+                "Example:\nhttps://polymarket.com/event/btc-price-2025"
             )
+            await state.set_state(UserStates.waiting_for_watch_link)
             return
 
         url_or_slug = parts[1].strip()
@@ -829,10 +1014,45 @@ class PolydictionsBot:
             slug = url_or_slug
 
         if self.watchlist.add(user_id, slug):
-            await message.answer(f"✅ Added <b>{slug}</b> to your watchlist!")
+            await message.answer(f"✅ Added <b>{slug}</b> to your watchlist!\n\n⏳ Fetching Market Context...")
             logger.info(f"User {user_id} added {slug} to watchlist")
+
+            # Fetch and send initial Market Context
+            try:
+                context = await PolymarketAPI.fetch_market_context(slug)
+                if context:
+                    # Cache it for future comparison
+                    self.news_tracker.check_for_update(slug, context)
+
+                    context_msg = f"🧠 <b>Market Context for {slug}:</b>\n\n{context[:2000]}"
+                    if len(context) > 2000:
+                        context_msg += "...\n\n<i>Use /deal for full context</i>"
+                    await message.answer(context_msg)
+                else:
+                    await message.answer("⚠️ Could not fetch Market Context for this event.")
+            except Exception as e:
+                logger.error(f"Error fetching context for {slug}: {e}")
+                await message.answer("⚠️ Error fetching Market Context.")
         else:
-            await message.answer("⚠️ This event is already in your watchlist.")
+            # Already in watchlist - check for updates
+            await message.answer(f"⏳ <b>{slug}</b> is already in your watchlist. Checking for updates...")
+
+            try:
+                context = await PolymarketAPI.fetch_market_context(slug)
+                if context:
+                    update = self.news_tracker.check_for_update(slug, context)
+                    if update:
+                        context_msg = f"📰 <b>New updates for {slug}:</b>\n\n{context[:2000]}"
+                        if len(context) > 2000:
+                            context_msg += "...\n\n<i>Use /deal for full context</i>"
+                        await message.answer(context_msg)
+                    else:
+                        await message.answer(f"ℹ️ No new updates for <b>{slug}</b> in the last 5 minutes.")
+                else:
+                    await message.answer("⚠️ Could not fetch Market Context.")
+            except Exception as e:
+                logger.error(f"Error checking updates for {slug}: {e}")
+                await message.answer("⚠️ Error checking for updates.")
 
     async def cmd_unwatch(self, message: Message):
         """Remove event from watchlist"""
@@ -1021,6 +1241,45 @@ class PolydictionsBot:
         else:
             await message.answer("❌ Alert not found.")
 
+    async def cmd_interval(self, message: Message):
+        """Set watchlist update interval"""
+        user_id = message.from_user.id
+        text = message.text or ""
+        parts = text.split()
+
+        current_interval = self.news_tracker.get_interval_minutes(user_id)
+
+        if len(parts) < 2:
+            await message.answer(
+                f"⏱️ <b>Update Interval</b>\n\n"
+                f"Current: <b>{current_interval} minutes</b>\n\n"
+                f"<b>Usage:</b>\n"
+                f"/interval &lt;minutes&gt;\n\n"
+                f"<b>Examples:</b>\n"
+                f"/interval 3 - every 3 minutes\n"
+                f"/interval 10 - every 10 minutes\n"
+                f"/interval 30 - every 30 minutes\n\n"
+                f"<i>Minimum: 3 minutes</i>"
+            )
+            return
+
+        try:
+            minutes = int(parts[1])
+        except ValueError:
+            await message.answer("❌ Please provide a number of minutes.")
+            return
+
+        if self.news_tracker.set_interval(user_id, minutes):
+            await message.answer(
+                f"✅ <b>Interval set to {minutes} minutes!</b>\n\n"
+                f"You'll receive watchlist updates every {minutes} minutes."
+            )
+        else:
+            await message.answer(
+                f"❌ Minimum interval is 3 minutes.\n\n"
+                f"Example: /interval 3"
+            )
+
     async def check_new_events(self):
         global seen_events
         logger.info(f"Starting event monitoring with {len(seen_events)} seen events already loaded")
@@ -1036,27 +1295,11 @@ class PolydictionsBot:
             logger.info(f"Initialized with {len(seen_events)} events")
         else:
             logger.info(f"Using existing {len(seen_events)} seen events from storage")
-            # Also fetch recent events and add any we might have missed
-            logger.info("Refreshing with recent events to catch any gaps...")
-            initial = await PolymarketAPI.fetch_recent_events(limit=50)
-            added_count = 0
-            for event in initial:
-                event_id = str(event.get('id', ''))
-                if event_id and event_id not in seen_events:
-                    volume = float(event.get('volume', 0) or 0)
-                    # Only add if volume > $10k (likely old event we missed)
-                    if volume > 10000:
-                        seen_events.add(event_id)
-                        added_count += 1
-                        logger.info(f"Added missed event to seen list: ID={event_id}, Volume=${volume:,.0f}")
-            if added_count > 0:
-                Storage.save_seen_events(seen_events)
-                logger.info(f"Added {added_count} previously missed events to seen list")
-        
+
         while True:
             try:
                 await asyncio.sleep(CHECK_INTERVAL)
-                
+
                 recent = await PolymarketAPI.fetch_recent_events(limit=20)
                 new_events = []
                 filtered_count = 0
@@ -1066,11 +1309,28 @@ class PolydictionsBot:
                     event_id = str(event.get('id', ''))
                     if event_id:
                         if event_id not in seen_events:
-                            # Additional check: filter out events with high volume (likely old events)
-                            # If volume > $50k, it's probably been around for a while
+                            # Check if event is actually new (created in last 48 hours)
+                            created_at_str = event.get('createdAt') or event.get('startDate')
+                            is_actually_new = False
+
+                            if created_at_str:
+                                try:
+                                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                                    now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.now()
+                                    age_hours = (now - created_at).total_seconds() / 3600
+                                    is_actually_new = age_hours < 48  # Only events created in last 48h
+                                except Exception as e:
+                                    logger.error(f"Error parsing date {created_at_str}: {e}")
+                                    is_actually_new = False
+
                             volume = float(event.get('volume', 0) or 0)
 
-                            if volume > 50000:
+                            if not is_actually_new:
+                                # Old event appearing for first time - mark as seen but don't notify
+                                seen_events.add(event_id)
+                                filtered_high_volume += 1
+                                logger.info(f"Filtered old event: ID={event_id}, Created={created_at_str}, Title={event.get('title', 'N/A')[:50]}")
+                            elif volume > 50000:
                                 # This is likely an old event with high volume, mark as seen but don't notify
                                 seen_events.add(event_id)
                                 filtered_high_volume += 1
@@ -1089,42 +1349,147 @@ class PolydictionsBot:
                     Storage.save_seen_events(seen_events)
                     logger.info(f"Found {len(new_events)} new events")
 
-                    if subscribed_users:
-                        for event in new_events:
-                            formatted = PolymarketAPI.format_event(event)
-                            notification = f"<b>New Polymarket Event</b>\n\n{formatted}"
+                    for event in new_events:
+                        formatted = PolymarketAPI.format_event(event)
+                        notification = f"🆕 <b>New Polymarket Event</b>\n\n{formatted}"
 
-                            for user_id in list(subscribed_users):
-                                try:
-                                    # Skip if user is paused
-                                    if user_id in paused_users:
-                                        continue
+                        # Post to channel only (no DM to users)
+                        if CHANNEL_ID:
+                            try:
+                                await self.bot.send_message(CHANNEL_ID, notification)
+                                logger.info(f"Posted event to channel {CHANNEL_ID}: {event.get('title', 'N/A')[:50]}")
 
-                                    # Check keyword filters
-                                    user_filter = user_keywords.get(user_id, [])
-                                    if user_filter and not PolymarketAPI.matches_keywords(event, user_filter):
-                                        # Event doesn't match user's keywords, skip
-                                        continue
+                                # Save to posted_events.json for extension sync
+                                Storage.save_posted_event(event)
 
-                                    # Send notification
-                                    await self.bot.send_message(user_id, notification)
-                                    await asyncio.sleep(0.5)
-                                except Exception as e:
-                                    logger.error(f"Failed to notify {user_id}: {e}")
-            
+                                await asyncio.sleep(0.5)
+                            except Exception as e:
+                                logger.error(f"Failed to post to channel {CHANNEL_ID}: {e}")
+
             except Exception as e:
                 logger.error(f"Error in monitoring: {e}")
-    
+
+    async def check_watchlist_news(self):
+        """Monitor watchlist events for news/context updates with per-user intervals"""
+        logger.info("Starting watchlist news monitoring...")
+
+        # Track last check time per user: {user_id: timestamp}
+        last_check: Dict[int, float] = {}
+
+        # Initial delay - wait 60 seconds before first check
+        logger.info("Waiting 60 seconds before first watchlist check...")
+        await asyncio.sleep(60)
+
+        while True:
+            try:
+                current_time = datetime.now().timestamp()
+
+                for user_id, user_slugs in self.watchlist.user_watchlists.items():
+                    if not user_slugs:
+                        continue
+
+                    # Get user's interval
+                    user_interval = self.news_tracker.get_interval(user_id)
+
+                    # Check if it's time to send update to this user
+                    user_last = last_check.get(user_id, 0)
+                    if current_time - user_last < user_interval:
+                        continue  # Not time yet
+
+                    # Update last check time
+                    last_check[user_id] = current_time
+
+                    logger.info(f"Checking news for user {user_id}: {len(user_slugs)} events (interval: {user_interval}s)")
+
+                    # Collect status for all slugs
+                    updates = []
+                    no_updates = []
+
+                    for slug in user_slugs:
+                        try:
+                            new_context = await PolymarketAPI.fetch_market_context(slug)
+
+                            if not new_context:
+                                no_updates.append(slug)
+                                continue
+
+                            update = self.news_tracker.check_for_update(slug, new_context)
+
+                            if update:
+                                updates.append((slug, new_context))
+                                logger.info(f"News update detected for {slug}")
+                            else:
+                                no_updates.append(slug)
+
+                            await asyncio.sleep(2)
+
+                        except Exception as e:
+                            logger.error(f"Error checking news for {slug}: {e}")
+                            no_updates.append(slug)
+
+                    # Build and send status message
+                    try:
+                        msg_parts = []
+                        interval_min = self.news_tracker.get_interval_minutes(user_id)
+
+                        for slug, context in updates:
+                            msg_parts.append(
+                                f"📰 <b>{slug}</b>\n"
+                                f"🔗 https://polymarket.com/event/{slug}\n"
+                                f"🧠 <b>New Update:</b>\n{context[:800]}"
+                            )
+                            if len(context) > 800:
+                                msg_parts.append("...\n<i>Use /deal for full context</i>")
+
+                        if no_updates:
+                            if len(no_updates) == 1:
+                                msg_parts.append(f"ℹ️ No new updates for <b>{no_updates[0]}</b>")
+                            else:
+                                no_update_lines = [f"<b>{slug}</b>\nℹ️ No new updates" for slug in no_updates]
+                                msg_parts.append("\n\n".join(no_update_lines))
+
+                        if msg_parts:
+                            header = f"📋 <b>Watchlist Status</b> ({datetime.now().strftime('%H:%M')})\n⏱️ Next update in {interval_min} min\n\n"
+                            full_msg = header + "\n\n".join(msg_parts)
+
+                            if len(full_msg) > 4000:
+                                full_msg = full_msg[:3950] + "\n\n<i>...truncated</i>"
+
+                            await self.bot.send_message(user_id, full_msg)
+                            logger.info(f"Sent watchlist status to user {user_id}")
+                            await asyncio.sleep(0.5)
+
+                    except Exception as e:
+                        logger.error(f"Failed to send status to {user_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error in news monitoring: {e}")
+
+            # Check every 30 seconds for users who need updates
+            await asyncio.sleep(30)
+
     async def start(self):
+        # Set up menu commands
+        await self.setup_bot_commands()
+
+        # Start API server for Chrome extension sync
+        from api_server import APIServer
+        api_server = APIServer(port=8765)
+        await api_server.start()
+
+        # Start event monitoring
         asyncio.create_task(self.check_new_events())
-        
-        logger.info("Bot started")
+
+        # Start watchlist news monitoring
+        asyncio.create_task(self.check_watchlist_news())
+
+        logger.info("Bot started with API server on port 8765")
         await self.dp.start_polling(self.bot, allowed_updates=["message"])
 
 
 async def main():
     token = None
-    
+
     try:
         import sys
         sys.path.insert(0, str(Path(__file__).parent))
@@ -1137,7 +1502,7 @@ async def main():
     except Exception as e:
         logger.error(f"Error loading config: {e}")
         token = os.getenv('BOT_TOKEN')
-    
+
     if not token:
         logger.error("BOT_TOKEN not found!")
         logger.error(f".env path: {Path(__file__).parent / '.env'}")
@@ -1147,7 +1512,7 @@ async def main():
         return
 
     token = token.strip()
-    
+
     bot = PolydictionsBot(token)
     await bot.start()
 
