@@ -1,40 +1,55 @@
-# Polydictions Chrome Extension
+# Polydictions
 
-A Chrome extension for tracking and analyzing Polymarket prediction markets.
+Real-time scanner and tracker for newly created Polymarket prediction markets.
 
 ## Features
 
-- **Overview Dashboard**: View total events, volume, and active markets
-- **Category Breakdown**: See events organized by crypto, politics, sports, finance, etc.
-- **Trending Events**: Track the most active markets by volume
-- **Watchlist**: Star your favorite events to track them
-- **Real-time Updates**: Auto-refresh data every 5 minutes
-- **Notifications**: Get notified when new events are created
+- **New Markets**: Track newly created markets in real-time
+- **Hot Markets**: See top markets by trading volume
+- **Trending Events**: Monitor the most active prediction markets
+- **Categories**: Filter by Crypto, Politics, Sports, Finance, Tech
+- **Watchlist**: Save and track your favorite markets
+- **Notifications**: Get alerts when new markets appear
 
 ## Installation
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable "Developer mode" in the top right
-3. Click "Load unpacked"
-4. Select the `chrome-extension` folder
-5. The extension icon should appear in your toolbar
+### From Chrome Web Store
+Coming soon
+
+### Manual Installation
+1. Download or clone this repository
+2. Open Chrome and go to `chrome://extensions/`
+3. Enable "Developer mode" (top right)
+4. Click "Load unpacked"
+5. Select the extension folder
+6. Pin the extension to your toolbar
 
 ## Usage
 
-Click the extension icon to open the popup with:
-- **Overview**: Stats and category breakdown
-- **Trending**: Top events by volume
-- **Watchlist**: Your starred events
+Click the extension icon to open the dashboard:
 
-## Development
+- **Overview** - Stats, categories, hot markets, new markets
+- **Trending** - Top events sorted by volume
+- **Watchlist** - Your saved markets
 
-The extension is built with vanilla JavaScript and uses:
+## Screenshots
+
+![Overview](screenshots/overview.png)
+![Trending](screenshots/trending.png)
+
+## Tech Stack
+
 - Manifest V3
+- Vanilla JavaScript
 - Polymarket Gamma API
-- Local Storage for watchlist
+- Chrome Storage API
 - Chrome Notifications API
 
 ## Links
 
-- Telegram Bot: https://t.me/polydictions_bot
-- GitHub: https://github.com/poly-dictions/polydictions
+- [Polymarket](https://polymarket.com)
+- [Twitter](https://twitter.com/polydictions)
+
+## License
+
+MIT
