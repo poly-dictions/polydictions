@@ -1,0 +1,77 @@
+# Environment and configuration
+.env
+.env.local
+.env.*.local
+config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+ENV/
+.venv/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Bot data files (old format - now in database)
+users.json
+seen_events.json
+keywords.json
+paused_users.json
+watchlist.json
+price_alerts.json
+user_categories.json
+user_intervals.json
+news_cache.json
+posted_events.json
+
+# Test
+test-bot/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (for Chrome extension)
+node_modules/
+
+# Docker
+.docker/
+
+# Misc
+*.bak
+*.tmp

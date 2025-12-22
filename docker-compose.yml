@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polydictions-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHANNEL_ID=${CHANNEL_ID:-}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/polydictions.db
+      - API_HOST=0.0.0.0
+      - API_PORT=8765
+      - API_SECRET_KEY=${API_SECRET_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "8765:8765"
+    volumes:
+      - polydictions-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: PostgreSQL for production
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: polydictions-db
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: polydictions
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: polydictions
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U polydictions"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # Optional: Redis for caching and rate limiting
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: polydictions-redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis-data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+volumes:
+  polydictions-data:
+  # postgres-data:
+  # redis-data:
+
+networks:
+  default:
+    name: polydictions-network
